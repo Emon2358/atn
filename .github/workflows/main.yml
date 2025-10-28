@@ -1,4 +1,4 @@
-name: Search cye04720 across archives (separated Python)
+name: Search mailto:cye04720@nifty.com across archives (separated Python)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -22,37 +22,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Make scripts executable
-        run: |
-          chmod +x scripts/*.py
-
-      - name: Generate candidate URLs
+      - name: Generate candidate URLs (seeds + search engines)
         env:
           EMAIL: cye04720@nifty.com
         run: |
           python scripts/generate_candidates.py --email "${EMAIL}" --out candidates.txt
-          echo "=== Candidates (head) ==="
-          head -n 50 candidates.txt || true
+          echo "=== candidates (head) ==="
+          head -n 200 candidates.txt || true
 
-      - name: Check archives for email
+      - name: Check Wayback snapshots for mailto
         env:
           EMAIL: cye04720@nifty.com
         run: |
-          python scripts/check_archives.py --email "${EMAIL}" --candidates candidates.txt --out found_archives.txt
+          python scripts/check_archives.py --email "${EMAIL}" --candidates candidates.txt --out found_archives.txt --excerpt-out found_excerpts.txt
 
-      - name: Show results
+      - name: Show & upload results
         if: always()
         run: |
-          echo "=== Found archive snapshots ==="
+          echo "=== Found snapshots (unique) ==="
           if [ -s found_archives.txt ]; then
             sort -u found_archives.txt | tee found_archives.txt
           else
-            echo "No results found in this run."
+            echo "No snapshots matched."
+          fi
+          echo
+          echo "=== Excerpts (if any) ==="
+          if [ -s found_excerpts.txt ]; then
+            sed -n '1,200p' found_excerpts.txt || true
+          else
+            echo "No excerpts."
           fi
 
-      - name: Upload results artifact
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: found-archives
-          path: found_archives.txt
+          name: search-results
+          path: |
+            found_archives.txt
+            found_excerpts.txt
+            candidates.txt
