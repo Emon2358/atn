@@ -1,0 +1,47 @@
+name: Search Mutarules in Wayback
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 0" # 週1回自動実行（任意）
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Search Wayback for Mutarules
+        run: |
+          URL="http://8028.teacup.com/koto/bbs"
+          echo "🔎 Searching Wayback Machine for snapshots of: $URL"
+          CDX="https://web.archive.org/cdx/search/cdx?url=${URL}&output=json&fl=timestamp,original"
+
+          # 取得
+          echo "Fetching snapshot list..."
+          curl -s "$CDX" > cdx.json
+          if [ ! -s cdx.json ]; then
+            echo "❌ Failed to download CDX list"
+            exit 1
+          fi
+
+          echo "📜 Checking for Mutarules..."
+          jq -r '.[1:][] | @tsv' cdx.json | while IFS=$'\t' read -r timestamp original; do
+            snap1="https://web.archive.org/web/${timestamp}id_/${original}"
+            snap2="https://web.archive.org/web/${timestamp}/${original}"
+            
+            echo "::group::Checking snapshot $timestamp"
+            if curl -sL --compressed "$snap1" | grep -i -m1 "Mutarules" >/dev/null; then
+              echo "✅ FOUND in $snap1"
+            elif curl -sL --compressed "$snap2" | grep -i -m1 "Mutarules" >/dev/null; then
+              echo "✅ FOUND in $snap2"
+            else
+              echo "❌ Not found in $timestamp"
+            fi
+            echo "::endgroup::"
+          done
