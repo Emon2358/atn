@@ -1,172 +1,56 @@
-name: Search cye04720@nifty.com Across Old Hosts and Wayback
+name: Search cye04720 across archives (separated Python)
 
 on:
   workflow_dispatch:
 
 jobs:
-  search-email:
+  search:
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq curl python3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-      - name: Search archives for cye04720@nifty.com
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Make scripts executable
+        run: |
+          chmod +x scripts/*.py
+
+      - name: Generate candidate URLs
         env:
-          EMAIL: "cye04720@nifty.com"
+          EMAIL: cye04720@nifty.com
         run: |
-          set -eux
+          python scripts/generate_candidates.py --email "${EMAIL}" --out candidates.txt
+          echo "=== Candidates (head) ==="
+          head -n 50 candidates.txt || true
 
-          EMAIL_RAW="${EMAIL}"
-          EMAIL_ESC=$(python3 - <<PY
-import urllib.parse, os
-print(urllib.parse.quote(os.environ['EMAIL'], safe=''))
-PY
-)
+      - name: Check archives for email
+        env:
+          EMAIL: cye04720@nifty.com
+        run: |
+          python scripts/check_archives.py --email "${EMAIL}" --candidates candidates.txt --out found_archives.txt
 
-          echo "Searching for: ${EMAIL_RAW}"
-          CAND="candidates.txt"
-          FOUND="found_archives.txt"
-          > "$CAND"
-          > "$FOUND"
-
-          # 1) Seed list: likely legacy hosting/domains and board endpoints to check
-          cat > seeds.txt <<'SEEDS'
-http://*.teacup.com/*
-http://*.upp.so-net.ne.jp/*
-http://*.u-page.so-net.ne.jp/*
-http://www.geocities.jp/*
-http://www.geocities.com/*
-http://members2.jcom.home.ne.jp/*
-http://www.nifty.com/*
-http://home.nifty.com/*
-http://*.biglobe.ne.jp/*
-http://*.so-net.ne.jp/*
-http://*.or.jp/*
-SEEDS
-
-          # Add some common personal site paths to test
-          cat >> seeds.txt <<'PATHS'
-/index.html
-/main.html
-/bbs/
-/BBS/
-/guestbook.html
-/guestbook/
-/bbs.html
-/board/
-/board.cgi
-/cgi-bin/bbs/
-/forum/
-/message/
-/msg/
-/talk/
-/weblog/
-/blog/
-PATHS
-
-          # Expand seeds into candidate original URLs heuristically
-          echo "Generating candidate original URLs..."
-          # We'll try combinations for some common host patterns
-          # (1) teacup subdomains: e.g. http://8028.teacup.com/koto/bbs
-          echo "http://8028.teacup.com/koto/bbs" >> "$CAND"
-          # (2) upp.so-net common homes
-          echo "http://www008.upp.so-net.ne.jp/NYMPH/" >> "$CAND"
-          echo "http://www12.u-page.so-net.ne.jp:80/ka3/nymph-/main.html" >> "$CAND"
-          # (3) some guessed geocities / nifty homepages (add variations)
-          echo "http://www.geocities.co.jp/AnimePixels/1234/" >> "$CAND"
-          echo "http://home.nifty.com/~cye04720/" >> "$CAND"
-          echo "http://www.nifty.com/~cye04720/" >> "$CAND"
-          # (4) common weblog/forum sites (wildcard handled by general search below)
-
-          # 2) Use search engines to find pages that contain the email (try Bing and DuckDuckGo)
-          echo "Querying search engines for pages mentioning the email..."
-          # Bing site:web.archive.org
-          bq="site:web.archive.org \"${EMAIL_RAW}\""
-          echo "Bing query: $bq"
-          curl -sA "Mozilla/5.0" "https://www.bing.com/search?q=$(echo $bq | sed 's/ /+/g')&count=50" \
-            | grep -oP 'href="\Khttps?://[^"]+' \
-            | grep -E 'web.archive.org|teacup.com|nifty' || true \
-            >> "$CAND" || true
-
-          # DuckDuckGo (html)
-          dq="\"${EMAIL_RAW}\""
-          curl -sA "Mozilla/5.0" "https://html.duckduckgo.com/html/?q=$(echo $dq | sed 's/ /+/g')" \
-            | grep -oP 'uddg=\Khttps?://[^&]+' \
-            | grep -E 'web.archive.org|teacup.com|nifty|geocities' || true \
-            >> "$CAND" || true
-
-          # 3) Also search web.archive.org directly via simple patterns
-          echo "Trying direct Wayback text-query patterns (best-effort)..."
-          echo "https://web.archive.org/web/*/*cye04720*" >> "$CAND"
-          echo "https://web.archive.org/web/*/*cye04720@nifty.com*" >> "$CAND"
-
-          # normalize list
-          sort -u "$CAND" -o "$CAND"
-
-          echo "Candidates count: $(wc -l < $CAND)"
-          head -n 50 "$CAND" || true
-
-          # Function to query CDX for an original URL and scan its snapshots for the email
-          check_original() {
-            orig="$1"
-            [ -z "$orig" ] && return
-            echo "Processing original: $orig"
-            # URL-encode
-            orig_enc=$(python3 - <<PY
-import urllib.parse,sys
-print(urllib.parse.quote(sys.argv[1], safe=''))
-PY
- "$orig")
-            # Query CDX; request status 200 and collapse duplicates
-            CDX="https://web.archive.org/cdx/search/cdx?url=${orig_enc}&output=json&fl=timestamp,original&filter=statuscode:200&collapse=digest"
-            curl -s "$CDX" > cdx.json || return
-            if [ ! -s cdx.json ]; then
-              echo "  No CDX entries for $orig"
-              return
-            fi
-            # iterate
-            jq -r '.[1:][] | @tsv' cdx.json 2>/dev/null | while IFS=$'\t' read -r ts o; do
-              snap="https://web.archive.org/web/${ts}id_/${o}"
-              # fetch and test
-              if curl -sL --compressed "$snap" | grep -i --binary-files=without-match -m1 "$(echo $EMAIL_RAW | sed 's/[]\\\\\$\*.^[]/\\\\&/g')" >/dev/null; then
-                echo "FOUND: $snap"
-                echo "$snap" >> "$FOUND"
-              fi
-            done
-          }
-
-          # 4) Directly check archive URLs (if any) and original candidates
-          while IFS= read -r u; do
-            [ -z "$u" ] && continue
-            # If it's a direct archive URL, test it
-            if echo "$u" | grep -q 'web.archive.org'; then
-              echo "Checking direct archive URL: $u"
-              if curl -sL --compressed "$u" | grep -i -m1 "$(echo $EMAIL_RAW | sed 's/[]\\\\\$\*.^[]/\\\\&/g')" >/dev/null; then
-                echo "FOUND: $u"
-                echo "$u" >> "$FOUND"
-              fi
-            else
-              check_original "$u"
-            fi
-          done < "$CAND"
-
-          # final dedupe
-          if [ -s "$FOUND" ]; then
-            sort -u "$FOUND" -o "$FOUND"
-            echo "=== FOUND ARCHIVE SNAPS ==="
-            cat "$FOUND"
+      - name: Show results
+        if: always()
+        run: |
+          echo "=== Found archive snapshots ==="
+          if [ -s found_archives.txt ]; then
+            sort -u found_archives.txt | tee found_archives.txt
           else
-            echo "No archived pages found in this run."
+            echo "No results found in this run."
           fi
 
-      - name: Upload results
+      - name: Upload results artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
